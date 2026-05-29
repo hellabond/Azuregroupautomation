@@ -77,8 +77,8 @@ $groupCache = @{}
 $uniqueGroups = $csvData.GroupName | Sort-Object -Unique
 
 foreach ($groupName in $uniqueGroups) {
-    $encodedName = [System.Web.HttpUtility]::UrlEncode($groupName)
-    $uri = "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '$groupName'&`$select=id,displayName"
+    # FIX 1: Use -f operator to build URL so & is never parsed as PS operator
+    $uri = "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '{0}'`&`$select=id,displayName" -f $groupName
 
     try {
         $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
@@ -149,7 +149,8 @@ foreach ($row in $csvData) {
     }
 
     # -- Check if user is already a member (avoid duplicate error)
-    $memberCheckUri = "https://graph.microsoft.com/v1.0/groups/$groupId/members?`$filter=id eq '$userId'&`$select=id"
+    # FIX 2: Use -f operator to build URL so & is never parsed as PS operator
+    $memberCheckUri = "https://graph.microsoft.com/v1.0/groups/{0}/members?`$filter=id eq '{1}'`&`$select=id" -f $groupId, $userId
     try {
         $memberCheck = Invoke-RestMethod -Method Get -Uri $memberCheckUri -Headers $headers -ErrorAction Stop
         if ($memberCheck.value.Count -gt 0) {
