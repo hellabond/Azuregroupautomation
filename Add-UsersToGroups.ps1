@@ -33,9 +33,9 @@ try {
         Authorization  = "Bearer $accessToken"
         "Content-Type" = "application/json"
     }
-    Write-Host "   ✅ Authentication successful." -ForegroundColor Green
+    Write-Host "   OK Authentication successful." -ForegroundColor Green
 } catch {
-    Write-Error "   ❌ Authentication failed: $($_.Exception.Message)"
+    Write-Error "   FAIL Authentication failed: $($_.Exception.Message)"
     exit 1
 }
 
@@ -45,7 +45,7 @@ try {
 Write-Host "`n[2/5] Loading CSV from: $CsvPath" -ForegroundColor Cyan
 
 if (-not (Test-Path $CsvPath)) {
-    Write-Error "   ❌ CSV file not found at path: $CsvPath"
+    Write-Error "   FAIL CSV file not found at path: $CsvPath"
     exit 1
 }
 
@@ -55,7 +55,7 @@ $csvData = Import-Csv -Path $CsvPath
 $requiredCols = @("UserPrincipalName", "GroupName")
 foreach ($col in $requiredCols) {
     if ($csvData[0].PSObject.Properties.Name -notcontains $col) {
-        Write-Error "   ❌ Missing required column '$col' in CSV."
+        Write-Error "   FAIL Missing required column '$col' in CSV."
         exit 1
     }
 }
@@ -66,7 +66,7 @@ $csvData = $csvData | Where-Object {
     -not [string]::IsNullOrWhiteSpace($_.GroupName)
 }
 
-Write-Host "   ✅ Loaded $($csvData.Count) valid rows." -ForegroundColor Green
+Write-Host "   OK Loaded $($csvData.Count) valid rows." -ForegroundColor Green
 
 # ----------------------------------------------------------------
 # STEP 3: Cache Group Object IDs (avoid duplicate lookups)
@@ -77,20 +77,21 @@ $groupCache = @{}
 $uniqueGroups = $csvData.GroupName | Sort-Object -Unique
 
 foreach ($groupName in $uniqueGroups) {
-    # FIX 1: Use -f operator to build URL so & is never parsed as PS operator
-    $uri = "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '{0}'`&`$select=id,displayName" -f $groupName
+    $filterPart  = "`$filter=displayName eq '$groupName'"
+    $selectPart  = "`$select=id,displayName"
+    $uri = "https://graph.microsoft.com/v1.0/groups?" + $filterPart + "&" + $selectPart
 
     try {
         $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
         if ($response.value.Count -eq 0) {
-            Write-Warning "   ⚠️  Group not found: '$groupName'"
+            Write-Warning "   WARN Group not found: '$groupName'"
             $groupCache[$groupName] = $null
         } else {
             $groupCache[$groupName] = $response.value[0].id
-            Write-Host "   ✅ Resolved group '$groupName' → $($response.value[0].id)" -ForegroundColor Green
+            Write-Host "   OK Resolved group '$groupName' -> $($response.value[0].id)" -ForegroundColor Green
         }
     } catch {
-        Write-Warning "   ⚠️  Error resolving group '$groupName': $($_.Exception.Message)"
+        Write-Warning "   WARN Error resolving group '$groupName': $($_.Exception.Message)"
         $groupCache[$groupName] = $null
     }
 }
@@ -109,17 +110,16 @@ foreach ($row in $csvData) {
     $upn       = $row.UserPrincipalName.Trim()
     $groupName = $row.GroupName.Trim()
 
-    Write-Host "`n   [$counter/$($csvData.Count)] $upn → $groupName" -ForegroundColor White
+    Write-Host "`n   [$counter/$($csvData.Count)] $upn -> $groupName" -ForegroundColor White
 
     # -- Resolve User (use cache if already looked up)
     if (-not $userCache.ContainsKey($upn)) {
         try {
-            $userResp = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/v1.0/users/$upn`?`$select=id,displayName" `
-                -Headers $headers -ErrorAction Stop
+            $userUri  = "https://graph.microsoft.com/v1.0/users/" + $upn + "?" + "`$select=id,displayName"
+            $userResp = Invoke-RestMethod -Method Get -Uri $userUri -Headers $headers -ErrorAction Stop
             $userCache[$upn] = $userResp.id
         } catch {
-            Write-Warning "      ⚠️  User not found: $upn — skipping."
+            Write-Warning "      WARN User not found: $upn - skipping."
             $userCache[$upn] = $null
         }
     }
@@ -130,31 +130,33 @@ foreach ($row in $csvData) {
     # -- Skip if user or group unresolvable
     if (-not $userId) {
         $results += [PSCustomObject]@{
-            UPN       = $upn
-            Group     = $groupName
-            Status    = "Skipped"
-            Reason    = "User not found in Azure AD"
+            UPN    = $upn
+            Group  = $groupName
+            Status = "Skipped"
+            Reason = "User not found in Azure AD"
         }
         continue
     }
 
     if (-not $groupId) {
         $results += [PSCustomObject]@{
-            UPN       = $upn
-            Group     = $groupName
-            Status    = "Skipped"
-            Reason    = "Group not found in Azure AD"
+            UPN    = $upn
+            Group  = $groupName
+            Status = "Skipped"
+            Reason = "Group not found in Azure AD"
         }
         continue
     }
 
     # -- Check if user is already a member (avoid duplicate error)
-    # FIX 2: Use -f operator to build URL so & is never parsed as PS operator
-    $memberCheckUri = "https://graph.microsoft.com/v1.0/groups/{0}/members?`$filter=id eq '{1}'`&`$select=id" -f $groupId, $userId
+    $memberFilterPart = "`$filter=id eq '$userId'"
+    $memberSelectPart = "`$select=id"
+    $memberCheckUri   = "https://graph.microsoft.com/v1.0/groups/" + $groupId + "/members?" + $memberFilterPart + "&" + $memberSelectPart
+
     try {
         $memberCheck = Invoke-RestMethod -Method Get -Uri $memberCheckUri -Headers $headers -ErrorAction Stop
         if ($memberCheck.value.Count -gt 0) {
-            Write-Host "      ℹ️  Already a member — skipping." -ForegroundColor Yellow
+            Write-Host "      INFO Already a member - skipping." -ForegroundColor Yellow
             $results += [PSCustomObject]@{
                 UPN    = $upn
                 Group  = $groupName
@@ -164,7 +166,7 @@ foreach ($row in $csvData) {
             continue
         }
     } catch {
-        # Non-fatal — proceed to add anyway
+        # Non-fatal - proceed to add anyway
     }
 
     # -- Add user to group
@@ -172,12 +174,12 @@ foreach ($row in $csvData) {
         "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$userId"
     } | ConvertTo-Json
 
-    try {
-        Invoke-RestMethod -Method Post `
-            -Uri "https://graph.microsoft.com/v1.0/groups/$groupId/members/`$ref" `
-            -Headers $headers -Body $addBody -ErrorAction Stop
+    $addUri = "https://graph.microsoft.com/v1.0/groups/" + $groupId + "/members/" + "`$ref"
 
-        Write-Host "      ✅ Added successfully." -ForegroundColor Green
+    try {
+        Invoke-RestMethod -Method Post -Uri $addUri -Headers $headers -Body $addBody -ErrorAction Stop
+
+        Write-Host "      OK Added successfully." -ForegroundColor Green
         $results += [PSCustomObject]@{
             UPN    = $upn
             Group  = $groupName
@@ -189,7 +191,7 @@ foreach ($row in $csvData) {
         try   { $errDetail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message }
         catch { $errDetail = $_.Exception.Message }
 
-        Write-Warning "      ❌ Failed: $errDetail"
+        Write-Warning "      FAIL Failed: $errDetail"
         $results += [PSCustomObject]@{
             UPN    = $upn
             Group  = $groupName
@@ -198,7 +200,7 @@ foreach ($row in $csvData) {
         }
     }
 
-    Start-Sleep -Milliseconds 200   # Avoid Graph throttling
+    Start-Sleep -Milliseconds 200
 }
 
 # ----------------------------------------------------------------
@@ -213,17 +215,16 @@ $skipped       = ($results | Where-Object Status -eq "Skipped").Count
 $alreadyMember = ($results | Where-Object Status -eq "AlreadyMember").Count
 
 Write-Host "`n============== SUMMARY ==============" -ForegroundColor Yellow
-Write-Host "  ✅ Success        : $success"        -ForegroundColor Green
-Write-Host "  ❌ Failed         : $failed"         -ForegroundColor Red
-Write-Host "  ⚠️  Skipped        : $skipped"        -ForegroundColor Yellow
-Write-Host "  ℹ️  Already Member : $alreadyMember"  -ForegroundColor Cyan
-Write-Host "  📋 Total Processed: $($results.Count)"
-Write-Host "======================================`n" -ForegroundColor Yellow
+Write-Host "  Success        : $success"
+Write-Host "  Failed         : $failed"
+Write-Host "  Skipped        : $skipped"
+Write-Host "  Already Member : $alreadyMember"
+Write-Host "  Total Processed: $($results.Count)"
+Write-Host "======================================"
 
-# Exit with error code if any hard failures (for Harness step status)
 if ($failed -gt 0) {
     Write-Warning "Some assignments failed. Check results CSV."
-    exit 2   # Harness will mark step as failed but pipeline continues
+    exit 2
 }
 
 exit 0
